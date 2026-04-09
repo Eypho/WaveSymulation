@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>WaveField — Волновой космос</title>
+<style>
+  html,body{height:100%;margin:0;background:#000}
+  canvas{display:block; width:100vw; height:100vh; touch-action:none; -webkit-tap-highlight-color: rgba(0,0,0,0);}
+  /* простые подсказки в углу */
+  #hud { position: absolute; left: 10px; top: 10px; color: #ddd; font-family: sans-serif; font-size:13px; pointer-events:none; text-shadow:0 1px 2px rgba(0,0,0,.8);}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">Touch to ripple • swipe for continuous strokes</div>
+
+<script>
+(() => {
+  // ========= Настройки (меняй по вкусу) =========
+  const SCALE = 3;            // уменьшение разрешения (2..6) — чем больше, тем быстрее
+  const DAMPING = 0.998;      // 0.98..0.999
+  const DROP_STRENGTH = 0.9;  // сила возмущения
+  const TOUCH_DENSITY = 1;  // точки на пиксель перемещения
+  const TOUCH_RADIUS = 1.5;     // радиус в буферных пикселях
+  const COLK = 0.9;          // вес космической части
+  const FYZK = 0.4;          // вес инженерной части (FYZK + COLK = 1 почти)
+  const TARGET_FPS = 60;
+  // ==============================================
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  // full screen and handle DPR
+  function resize() {
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = Math.floor(window.innerWidth * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    // buffer resolution (smaller for performance)
+    bufW = Math.max(16, Math.floor(canvas.width / SCALE));
+    bufH = Math.max(16, Math.floor(canvas.height / SCALE));
+    initBuffers();
+  }
+  window.addEventListener('resize', resize, {passive:true});
+
+  let bufW = 64, bufH = 64;
+  let prev, curr; // Float32Array length bufW*bufH
+  let imageData, offscreenCanvas, offscreenCtx;
+
+  function initBuffers() {
+    prev = new Float32Array(bufW * bufH);
+    curr = new Float32Array(bufW * bufH);
+    // offscreen for low-res draw
+    offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = bufW;
+    offscreenCanvas.height = bufH;
+    offscreenCtx = offscreenCanvas.getContext('2d', { alpha: false });
+    imageData = offscreenCtx.createImageData(bufW, bufH);
+  }
+
+  // helper index
+  function idx(x,y){ return y*bufW + x; }
+
+  // Add circular drop into curr buffer
+  function addDropAt(bx, by, radius=TOUCH_RADIUS, strength=DROP_STRENGTH) {
+    const r = radius|0;
+    const y0 = Math.max(0, by - r);
+    const y1 = Math.min(bufH - 1, by + r);
+    const x0 = Math.max(0, bx - r);
+    const x1 = Math.min(bufW - 1, bx + r);
+    const rr = r * r;
+    for(let y = y0; y <= y1; y++){
+      const dy = y - by;
+      const dy2 = dy*dy;
+      let base = y * bufW;
+      for(let x = x0; x <= x1; x++){
+        const dx = x - bx;
+        if (dx*dx + dy2 <= rr) {
+          curr[base + x] += strength;
+        }
+      }
+    }
+  }
+
+  // Interpolated line adding drops
+  function addWaveLine(p1, p2, radius=TOUCH_RADIUS) {
+    const x1 = p1[0], y1 = p1[1];
+    const x2 = p2[0], y2 = p2[1];
+    const dx = x2 - x1, dy = y2 - y1;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) {
+      addDropAt(Math.round(x1), Math.round(y1), radius);
+      return;
+    }
+    const steps = Math.max(1, Math.floor(dist * TOUCH_DENSITY));
+    for (let i=0;i<=steps;i++){
+      const t = i / steps;
+      const xi = Math.round(x1 + dx * t);
+      const yi = Math.round(y1 + dy * t);
+      addDropAt(xi, yi, radius);
+    }
+  }
+
+  // Hybrid palette like in Python
+  function hybridColor(value) {
+    // value: float, expected about [-~1..~1] (but clipped)
+    const scaled = value * 2.0;
+    const clipped = Math.max(-1, Math.min(1, scaled));
+    const pos = Math.max(0, clipped);
+    const neg = Math.max(0, -clipped);
+    const R_phys = pos;
+    const B_phys = neg;
+    const G_phys = (1.0 - Math.abs(clipped)) * 0.7;
+
+    // cosmic oscillatory component (cheap)
+    const a = value * 1.0;
+    const cosmic_r = 0.5 + 0.5 * Math.sin(a + 1.0);
+    const cosmic_g = 0.5 + 0.5 * Math.sin(a + 3.0);
+    const cosmic_b = 0.5 + 0.5 * Math.sin(a + 5.0);
+
+    const R = (R_phys * FYZK + cosmic_r * COLK) * 255 | 0;
+    const G = (G_phys * FYZK + cosmic_g * COLK) * 255 | 0;
+    const B = (B_phys * FYZK + cosmic_b * COLK) * 255 | 0;
+    return [R, G, B, 255];
+  }
+
+  // render curr -> offscreen imageData
+  function renderToImage() {
+    const data = imageData.data; // Uint8ClampedArray
+    let p = 0;
+    // we can compute min/max to normalize if desired, but hybridColor internally clamps
+    for (let y=0;y<bufH;y++){
+      for (let x=0;x<bufW;x++){
+        const v = curr[p];
+        const c = hybridColor(v);
+        data[p*4 + 0] = c[0];
+        data[p*4 + 1] = c[1];
+        data[p*4 + 2] = c[2];
+        data[p*4 + 3] = 255;
+        p++;
+      }
+    }
+    offscreenCtx.putImageData(imageData, 0, 0);
+    // draw scaled to main canvas
+    // use drawImage which lets GPU handle scaling
+    ctx.drawImage(offscreenCanvas, 0, 0, canvas.width, canvas.height);
+  }
+
+  // wave step: simple 2D stencil (like Python)
+  function stepWave() {
+    // we use prev and curr arrays; compute next into prev (reuse arrays by swapping)
+    // next = (sum of neighbors)/2 - prev
+    // Here we write into prev (which will become 'next'), then swap references
+    const w = bufW, h = bufH;
+    // we avoid borders (leave zeros)
+    for (let y=1; y<h-1; y++){
+      let idxRow = y * w;
+      let idxUp = (y-1) * w;
+      let idxDown = (y+1) * w;
+      for (let x=1; x<w-1; x++){
+        const id = idxRow + x;
+        const neighborSum = curr[idxUp + x] + curr[idxDown + x] + curr[idxRow + x - 1] + curr[idxRow + x + 1];
+        const nextVal = (neighborSum * 0.5005) - prev[id];
+        prev[id] = nextVal * DAMPING;
+      }
+    }
+    // swap buffers: prev<->curr
+    const t = prev; prev = curr; curr = t;
+  }
+
+  // Touch handling: map page coords to buffer coords
+  const lastTouches = new Map(); // id -> [bx,by]
+  function toBufferCoords(clientX, clientY) {
+    // compute relative to canvas (considering canvas sized in physical px)
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) * (canvas.width / rect.width);
+    const y = (clientY - rect.top) * (canvas.height / rect.height);
+    const bx = Math.round(x * (bufW / canvas.width));
+    const by = Math.round(y * (bufH / canvas.height));
+    return [bx, by];
+  }
+
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    for (let t of Array.from(e.changedTouches)) {
+      const id = t.identifier;
+      const [bx,by] = toBufferCoords(t.clientX, t.clientY);
+      lastTouches.set(id, [bx,by]);
+      addDropAt(bx,by, TOUCH_RADIUS, DROP_STRENGTH);
+    }
+  }, {passive:false});
+
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    for (let t of Array.from(e.changedTouches)) {
+      const id = t.identifier;
+      const [bx,by] = toBufferCoords(t.clientX, t.clientY);
+      const prevPt = lastTouches.get(id);
+      if (prevPt) {
+        addWaveLine(prevPt, [bx,by], TOUCH_RADIUS);
+      } else {
+        addDropAt(bx,by, TOUCH_RADIUS, DROP_STRENGTH);
+      }
+      lastTouches.set(id, [bx,by]);
+    }
+  }, {passive:false});
+
+  canvas.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    for (let t of Array.from(e.changedTouches)) {
+      lastTouches.delete(t.identifier);
+    }
+  }, {passive:false});
+  canvas.addEventListener('touchcancel', (e)=>{ for (let t of Array.from(e.changedTouches)) lastTouches.delete(t.identifier); }, {passive:false});
+
+  // mouse fallback (for desktop testing)
+  let mouseDown = false, lastMouse = null;
+  canvas.addEventListener('mousedown', (ev) => {
+    ev.preventDefault();
+    mouseDown = true;
+    const [bx,by] = toBufferCoords(ev.clientX, ev.clientY);
+    lastMouse = [bx,by];
+    addDropAt(bx,by, TOUCH_RADIUS, DROP_STRENGTH);
+  });
+  canvas.addEventListener('mousemove', (ev) => {
+    if (!mouseDown) return;
+    const [bx,by] = toBufferCoords(ev.clientX, ev.clientY);
+    if (lastMouse) addWaveLine(lastMouse, [bx,by], TOUCH_RADIUS);
+    lastMouse = [bx,by];
+  });
+  window.addEventListener('mouseup', ()=>{ mouseDown = false; lastMouse = null; });
+
+  // animation loop
+  let then = performance.now();
+  function loop(now) {
+    // framerate limiting
+    const elapsed = now - then;
+    const minInterval = 1000 / TARGET_FPS;
+    if (elapsed < minInterval) {
+      requestAnimationFrame(loop);
+      return;
+    }
+    then = now;
+
+    // do a few internal substeps if needed (not necessary now)
+    stepWave();
+    renderToImage();
+
+    requestAnimationFrame(loop);
+  }
+
+  // initialize
+  resize();
+
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
