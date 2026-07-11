@@ -3,42 +3,150 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
-<title>WaveField — Волновой космос</title>
+<title>WaveField — Power & Shape Edition</title>
 <style>
-  html,body{height:100%;margin:0;background:#000}
+  html,body{height:100%;margin:0;background:#000; overflow: hidden; user-select: none; -webkit-user-select: none;}
   canvas{display:block; width:100vw; height:100vh; touch-action:none; -webkit-tap-highlight-color: rgba(0,0,0,0);}
-  /* простые подсказки в углу */
-  #hud { position: absolute; left: 10px; top: 10px; color: #ddd; font-family: sans-serif; font-size:13px; pointer-events:none; text-shadow:0 1px 2px rgba(0,0,0,.8);}
+  
+  #menu-container {
+    position: absolute;
+    left: 15px;
+    top: 15px;
+    z-index: 100;
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 280px;
+  }
+  #slider-container {
+    background: rgba(20, 20, 25, 0.9);
+    color: #fff;
+    border: 1px solid #444;
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    backdrop-filter: blur(5px);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .slider-item { display: flex; flex-direction: column; gap: 4px; }
+  input[type="range"] { width: 100%; margin: 0; cursor: pointer; }
+  select {
+    background: #252530; color: #fff; border: 1px solid #555;
+    padding: 4px; border-radius: 6px; width: 100%; cursor: pointer; outline: none;
+  }
+  #menu-toggle {
+    background: rgba(30, 30, 35, 0.9); color: #fff; border: 1px solid #555;
+    padding: 12px 20px; border-radius: 8px; font-size: 14px; font-weight: bold;
+    cursor: pointer; backdrop-filter: blur(5px); text-align: left;
+  }
+  #menu-list {
+    display: none; background: rgba(15, 15, 18, 0.95); border: 1px solid #444;
+    border-radius: 8px; padding: 4px 0; max-height: 45vh; overflow-y: auto;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+  }
+  #menu-list.open { display: block; }
+  .menu-item { padding: 12px 20px; color: #ccc; cursor: pointer; font-size: 13px; border-bottom: 1px solid #2a2a2a; }
+  .menu-item:last-child { border-bottom: none; }
+  .menu-item.selected { background: #007bff; color: #fff; font-weight: bold; }
 </style>
 </head>
 <body>
-<canvas id="c"></canvas>
-<div id="hud">Touch to ripple • swipe for continuous strokes</div>
 
+<canvas id="c"></canvas>
+
+<div id="menu-container">
+  <div id="slider-container">
+    <div class="slider-item">
+      📐 Форма кисти:
+      <select id="brush-shape">
+        <option value="circle">⭕ Круг</option>
+        <option value="square">🔲 Квадрат</option>
+      </select>
+    </div>
+    <div class="slider-item">
+      🖌️ Радиус кисти: <span id="thickness-val">2</span>
+      <input type="range" id="brush-thickness" min="1" max="15" value="2">
+    </div>
+    <div class="slider-item">
+      ⚡ Сила эффектов: <span id="strength-val">1.0</span>
+      <input type="range" id="effect-strength" min="0.1" max="3.0" step="0.1" value="1.0">
+    </div>
+  </div>
+  <button id="menu-toggle">🛠️ Инструмент: Волна</button>
+  <div id="menu-list"></div>
+</div>
+
+<script src="objects.js"></script>
 <script>
 (() => {
-  // ========= Настройки (меняй по вкусу) =========
-  const SCALE = 3;            // уменьшение разрешения (2..6) — чем больше, тем быстрее
-  const DAMPING = 0.998;      // 0.98..0.999
-  const DROP_STRENGTH = 0.9;  // сила возмущения
-  const TOUCH_DENSITY = 1;  // точки на пиксель перемещения
-  const TOUCH_RADIUS = 1.5;     // радиус в буферных пикселях
-  const COLK = 0.9;          // вес космической части
-  const FYZK = 0.4;          // вес инженерной части (FYZK + COLK = 1 почти)
+  const SCALE = 4;
+  const DAMPING = 0.995;
+  const DROP_STRENGTH = 1.2;
+  const TOUCH_DENSITY = 1.2; 
   const TARGET_FPS = 60;
-  // ==============================================
+  const COLK = 0.94; 
+  const FYZK = 0.15; 
+
+  let activeOscillators = [];
+  let currentObjectIndex = 0;
+  let brushRadius = 2;
+  let brushShape = 'circle';
+  let effectStrength = 1.0;
 
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d', { alpha: false });
+  
+  const menuContainer = document.getElementById('menu-container');
+  const menuToggle = document.getElementById('menu-toggle');
+  const menuList = document.getElementById('menu-list');
+  const thicknessSlider = document.getElementById('brush-thickness');
+  const thicknessVal = document.getElementById('thickness-val');
+  const strengthSlider = document.getElementById('effect-strength');
+  const strengthVal = document.getElementById('strength-val');
+  const shapeSelect = document.getElementById('brush-shape');
 
-  // full screen and handle DPR
+  function initMenu() {
+    menuList.innerHTML = '';
+    buildableObjects.forEach((obj, index) => {
+      const item = document.createElement('div');
+      item.className = `menu-item ${index === currentObjectIndex ? 'selected' : ''}`;
+      item.textContent = obj.name;
+      item.addEventListener('click', () => {
+        currentObjectIndex = index;
+        menuToggle.textContent = `🛠️ ${obj.name}`;
+        menuList.classList.remove('open');
+        document.querySelectorAll('.menu-item').forEach((el, i) => {
+          el.classList.toggle('selected', i === index);
+        });
+      });
+      menuList.appendChild(item);
+    });
+
+    menuToggle.addEventListener('click', () => menuList.classList.toggle('open'));
+    thicknessSlider.addEventListener('input', (e) => {
+      brushRadius = parseInt(e.target.value);
+      thicknessVal.textContent = brushRadius;
+    });
+    strengthSlider.addEventListener('input', (e) => {
+      effectStrength = parseFloat(e.target.value);
+      strengthVal.textContent = effectStrength.toFixed(1);
+    });
+    shapeSelect.addEventListener('change', (e) => {
+      brushShape = e.target.value;
+    });
+    menuContainer.addEventListener('pointerdown', (e) => e.stopPropagation());
+  }
+
   function resize() {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     canvas.width = Math.floor(window.innerWidth * dpr);
     canvas.height = Math.floor(window.innerHeight * dpr);
     canvas.style.width = window.innerWidth + 'px';
     canvas.style.height = window.innerHeight + 'px';
-    // buffer resolution (smaller for performance)
     bufW = Math.max(16, Math.floor(canvas.width / SCALE));
     bufH = Math.max(16, Math.floor(canvas.height / SCALE));
     initBuffers();
@@ -46,13 +154,15 @@
   window.addEventListener('resize', resize, {passive:true});
 
   let bufW = 64, bufH = 64;
-  let prev, curr; // Float32Array length bufW*bufH
+  let prev, curr;
+  let objectGrid;
   let imageData, offscreenCanvas, offscreenCtx;
 
   function initBuffers() {
     prev = new Float32Array(bufW * bufH);
     curr = new Float32Array(bufW * bufH);
-    // offscreen for low-res draw
+    objectGrid = new Uint8Array(bufW * bufH);
+    activeOscillators = [];
     offscreenCanvas = document.createElement('canvas');
     offscreenCanvas.width = bufW;
     offscreenCanvas.height = bufH;
@@ -60,52 +170,9 @@
     imageData = offscreenCtx.createImageData(bufW, bufH);
   }
 
-  // helper index
   function idx(x,y){ return y*bufW + x; }
 
-  // Add circular drop into curr buffer
-  function addDropAt(bx, by, radius=TOUCH_RADIUS, strength=DROP_STRENGTH) {
-    const r = radius|0;
-    const y0 = Math.max(0, by - r);
-    const y1 = Math.min(bufH - 1, by + r);
-    const x0 = Math.max(0, bx - r);
-    const x1 = Math.min(bufW - 1, bx + r);
-    const rr = r * r;
-    for(let y = y0; y <= y1; y++){
-      const dy = y - by;
-      const dy2 = dy*dy;
-      let base = y * bufW;
-      for(let x = x0; x <= x1; x++){
-        const dx = x - bx;
-        if (dx*dx + dy2 <= rr) {
-          curr[base + x] += strength;
-        }
-      }
-    }
-  }
-
-  // Interpolated line adding drops
-  function addWaveLine(p1, p2, radius=TOUCH_RADIUS) {
-    const x1 = p1[0], y1 = p1[1];
-    const x2 = p2[0], y2 = p2[1];
-    const dx = x2 - x1, dy = y2 - y1;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 1) {
-      addDropAt(Math.round(x1), Math.round(y1), radius);
-      return;
-    }
-    const steps = Math.max(1, Math.floor(dist * TOUCH_DENSITY));
-    for (let i=0;i<=steps;i++){
-      const t = i / steps;
-      const xi = Math.round(x1 + dx * t);
-      const yi = Math.round(y1 + dy * t);
-      addDropAt(xi, yi, radius);
-    }
-  }
-
-  // Hybrid palette like in Python
   function hybridColor(value) {
-    // value: float, expected about [-~1..~1] (but clipped)
     const scaled = value * 2.0;
     const clipped = Math.max(-1, Math.min(1, scaled));
     const pos = Math.max(0, clipped);
@@ -113,149 +180,240 @@
     const R_phys = pos;
     const B_phys = neg;
     const G_phys = (1.0 - Math.abs(clipped)) * 0.7;
-
-    // cosmic oscillatory component (cheap)
-    const a = value * 1.0;
+    const a = value * 3.0;
     const cosmic_r = 0.5 + 0.5 * Math.sin(a + 1.0);
     const cosmic_g = 0.5 + 0.5 * Math.sin(a + 3.0);
     const cosmic_b = 0.5 + 0.5 * Math.sin(a + 5.0);
-
     const R = (R_phys * FYZK + cosmic_r * COLK) * 255 | 0;
     const G = (G_phys * FYZK + cosmic_g * COLK) * 255 | 0;
     const B = (B_phys * FYZK + cosmic_b * COLK) * 255 | 0;
     return [R, G, B, 255];
   }
 
-  // render curr -> offscreen imageData
+  function paintObjectAt(bx, by, pointerId, p1, p2) {
+    const obj = buildableObjects[currentObjectIndex];
+    const r = brushRadius | 0;
+    const pointerIndex = pointerOrder.indexOf(pointerId);
+
+    const y0 = Math.max(4, by - r + 1), y1 = Math.min(bufH - 5, by + r - 1);
+    const x0 = Math.max(4, bx - r + 1), x1 = Math.min(bufW - 5, bx + r - 1);
+
+    if (obj.type === 'manipulator' && p1 && p2) {
+      const dx = (p2[0] - p1[0]) * effectStrength;
+      const dy = (p2[1] - p1[1]) * effectStrength;
+      if (dx !== 0 || dy !== 0) {
+        const sx = Math.sign(dx), sy = Math.sign(dy);
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            if (brushShape === 'circle' && r > 1 && Math.hypot(x - bx, y - by) >= r) continue;
+            const src = idx(x, y), dst = idx(x + sx, y + sy);
+            if (objectGrid[src] === 0 && objectGrid[dst] === 0) {
+              const shiftAmt = curr[src] * 0.4;
+              curr[src] -= shiftAmt; curr[dst] += shiftAmt;
+              const shiftPrev = prev[src] * 0.4;
+              prev[src] -= shiftPrev; prev[dst] += shiftPrev;
+            }
+          }
+        }
+      }
+      return;
+    }
+
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        // Проверка геометрии кисти (Круг / Квадрат)
+        if (brushShape === 'circle' && r > 1 && Math.hypot(x - bx, y - by) >= r) continue;
+
+        const i = idx(x, y);
+        if (obj.type === 'wave') {
+          if (objectGrid[i] === 0 || objectGrid[i] === 8) curr[i] += DROP_STRENGTH * effectStrength;
+        } else if (obj.type === 'eraser') {
+          objectGrid[i] = 0;
+          curr[i] = 0; prev[i] = 0;
+          activeOscillators = activeOscillators.filter(o => o.x !== x || o.y !== y);
+        } else if (obj.type === 'static' || obj.type === 'blackhole' || obj.type === 'vortex') {
+          objectGrid[i] = obj.id;
+        } else if (obj.type === 'oscillator') {
+          objectGrid[i] = 0;
+          activeOscillators = activeOscillators.filter(o => o.x !== x || o.y !== y);
+          activeOscillators.push({ x: x, y: y, id: obj.id, ...obj, createdAt: performance.now() });
+          objectGrid[i] = obj.id;
+        } else if (obj.type === 'teleport') {
+          objectGrid[i] = (pointerIndex === 0) ? 7 : 8;
+        }
+      }
+    }
+  }
+
+  function drawBrushLine(p1, p2, pointerId) {
+    const [x1, y1] = p1, [x2, y2] = p2;
+    const dx = x2 - x1, dy = y2 - y1;
+    const dist = Math.hypot(dx, dy);
+    const steps = Math.max(1, Math.floor(dist * TOUCH_DENSITY));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      paintObjectAt(Math.round(x1 + dx * t), Math.round(y1 + dy * t), pointerId, p1, p2);
+    }
+  }
+
+  function updateOscillators(now) {
+    for (let i = activeOscillators.length - 1; i >= 0; i--) {
+        const osc = activeOscillators[i];
+        if (now - osc.createdAt > osc.lifespan) {
+            objectGrid[idx(osc.x, osc.y)] = 0;
+            activeOscillators.splice(i, 1);
+            continue;
+        }
+        let strength = 0;
+        const elapsedTime = now - osc.createdAt;
+        if (osc.formula === 'sine') strength = Math.sin(elapsedTime * osc.frequency) * osc.strength * effectStrength;
+        else if (osc.formula === 'pulse') { if ((elapsedTime % osc.period) < 40) strength = osc.strength * effectStrength; }
+        curr[idx(osc.x, osc.y)] += strength;
+    }
+  }
+
   function renderToImage() {
-    const data = imageData.data; // Uint8ClampedArray
+    const data = imageData.data;
     let p = 0;
-    // we can compute min/max to normalize if desired, but hybridColor internally clamps
-    for (let y=0;y<bufH;y++){
-      for (let x=0;x<bufW;x++){
-        const v = curr[p];
-        const c = hybridColor(v);
-        data[p*4 + 0] = c[0];
-        data[p*4 + 1] = c[1];
-        data[p*4 + 2] = c[2];
-        data[p*4 + 3] = 255;
+    const time = performance.now();
+    for (let y=0; y<bufH; y++){
+      for (let x=0; x<bufW; x++){
+        const objectId = objectGrid[p];
+        if (objectId > 0) {
+          let color = null, isOsc = false;
+          if (objectId === 8) color = [0, 160 + Math.sin(time * 0.01) * 60, 255]; 
+          else if (objectId === 12) color = [0, 130 + Math.sin(time*0.015 + x*0.2)*40, 90 + Math.cos(time*0.01 + y*0.2)*30];
+          else {
+            const object = buildableObjects.find(o => o.id === objectId);
+            if (object) { color = object.color; if (object.type === 'oscillator') isOsc = true; }
+          }
+          if (color) {
+            if (isOsc) {
+              const brightness = 0.5 + Math.min(0.5, Math.abs(curr[p]) * 0.3);
+              data[p*4 + 0] = color[0] * brightness; data[p*4 + 1] = color[1] * brightness; data[p*4 + 2] = color[2] * brightness;
+            } else {
+              data[p*4 + 0] = color[0]; data[p*4 + 1] = color[1]; data[p*4 + 2] = color[2];
+            }
+            data[p*4 + 3] = 255;
+          }
+        } else {
+          const c = hybridColor(curr[p]);
+          data[p*4 + 0] = c[0]; data[p*4 + 1] = c[1]; data[p*4 + 2] = c[2]; data[p*4 + 3] = 255;
+        }
         p++;
       }
     }
     offscreenCtx.putImageData(imageData, 0, 0);
-    // draw scaled to main canvas
-    // use drawImage which lets GPU handle scaling
     ctx.drawImage(offscreenCanvas, 0, 0, canvas.width, canvas.height);
   }
 
-  // wave step: simple 2D stencil (like Python)
   function stepWave() {
-    // we use prev and curr arrays; compute next into prev (reuse arrays by swapping)
-    // next = (sum of neighbors)/2 - prev
-    // Here we write into prev (which will become 'next'), then swap references
+    for (let i = 0; i < curr.length; i++) {
+        if(objectGrid[i] === 0 || objectGrid[i] === 8) curr[i] *= DAMPING;
+    }
+    
+    let totalTeleportEnergy = 0;
+    let exitCells = [];
     const w = bufW, h = bufH;
-    // we avoid borders (leave zeros)
-    for (let y=1; y<h-1; y++){
-      let idxRow = y * w;
-      let idxUp = (y-1) * w;
-      let idxDown = (y+1) * w;
-      for (let x=1; x<w-1; x++){
-        const id = idxRow + x;
-        const neighborSum = curr[idxUp + x] + curr[idxDown + x] + curr[idxRow + x - 1] + curr[idxRow + x + 1];
-        const nextVal = (neighborSum * 0.5005) - prev[id];
-        prev[id] = nextVal * DAMPING;
+
+    // Границы сужены до 3 ячеек, чтобы избежать out-of-bounds при масштабной выборке волноворота
+    for (let y=3; y<h-3; y++){
+      for (let x=3; x<w-3; x++){
+        const id = idx(x, y);
+        const gridStatus = objectGrid[id];
+        
+        if (gridStatus === 11) { // ЧЁРНАЯ ДЫРА
+          prev[id] = curr[id] * Math.max(0, 0.45 - effectStrength * 0.08);
+          continue;
+        }
+        if (gridStatus === 12) { // ВОЛНОВОРОТ (Масштабное вихревое вращение)
+          const neighborSum = curr[id - w] + curr[id + w] + curr[id - 1] + curr[id + 1];
+          
+          // Тройной каскад выборки (ротор ближнего, среднего и дальнего радиуса)
+          const rot1 = (curr[id - w - 1] + curr[id + w + 1]) - (curr[id - w + 1] + curr[id + w - 1]);
+          const rot2 = (curr[id - 2*w - 2] + curr[id + 2*w + 2]) - (curr[id - 2*w + 2] + curr[id + 2*w - 2]);
+          const rot3 = (curr[id - 3*w - 3] + curr[id + 3*w + 3]) - (curr[id - 3*w + 3] + curr[id + 3*w - 3]);
+          
+          // Суммируем масштабный закручивающий момент, умножая на слайдер силы
+          const totalRot = (rot1 * 0.4 + rot2 * 0.6 + rot3 * 0.5) * effectStrength;
+          
+          prev[id] = (neighborSum * 0.5 - prev[id]) + totalRot;
+          prev[id] *= DAMPING;
+          continue;
+        }
+        if (gridStatus === 7) { 
+          totalTeleportEnergy += (curr[id - w] + curr[id + w] + curr[id - 1] + curr[id + 1]) * 0.25;
+          prev[id] = 0; continue;
+        }
+        if (gridStatus === 8) { exitCells.push(id); }
+        if (gridStatus === 9) { // Губка
+          prev[id] = (curr[id - w] + curr[id + w] + curr[id - 1] + curr[id + 1]) * 0.5 - prev[id];
+          prev[id] *= Math.max(0, 0.15 / effectStrength); // Чем выше сила, тем мощнее гасит
+          continue;
+        }
+        if (gridStatus === 10) { // Резонанс
+          const nSum = curr[id - w] + curr[id + w] + curr[id - 1] + curr[id + 1];
+          const amp = 1.35 * effectStrength;
+          prev[id] = Math.max(-5, Math.min(5, (nSum * 0.5 - prev[id]) * amp));
+          continue;
+        }
+        if (gridStatus > 0 && gridStatus !== 8) { prev[id] = 0; continue; }
+        
+        prev[id] = ((curr[id - w] + curr[id + w] + curr[id - 1] + curr[id + 1]) * 0.5 - prev[id]);
       }
     }
-    // swap buffers: prev<->curr
-    const t = prev; prev = curr; curr = t;
+    
+    if (exitCells.length > 0 && Math.abs(totalTeleportEnergy) > 0.01) {
+      const energyPerExit = totalTeleportEnergy / exitCells.length;
+      for (let eId of exitCells) prev[eId] += energyPerExit;
+    }
+    [prev, curr] = [curr, prev];
   }
 
-  // Touch handling: map page coords to buffer coords
-  const lastTouches = new Map(); // id -> [bx,by]
-  function toBufferCoords(clientX, clientY) {
-    // compute relative to canvas (considering canvas sized in physical px)
+  const toBufferCoords = (clientX, clientY) => {
     const rect = canvas.getBoundingClientRect();
-    const x = (clientX - rect.left) * (canvas.width / rect.width);
-    const y = (clientY - rect.top) * (canvas.height / rect.height);
-    const bx = Math.round(x * (bufW / canvas.width));
-    const by = Math.round(y * (bufH / canvas.height));
-    return [bx, by];
-  }
+    return [Math.round((clientX - rect.left) * (bufW / rect.width)), Math.round((clientY - rect.top) * (bufH / rect.height))];
+  };
 
-  canvas.addEventListener('touchstart', (e) => {
-    e.preventDefault();
-    for (let t of Array.from(e.changedTouches)) {
-      const id = t.identifier;
-      const [bx,by] = toBufferCoords(t.clientX, t.clientY);
-      lastTouches.set(id, [bx,by]);
-      addDropAt(bx,by, TOUCH_RADIUS, DROP_STRENGTH);
-    }
-  }, {passive:false});
+  const activePointers = new Map();
+  let pointerOrder = [];
 
-  canvas.addEventListener('touchmove', (e) => {
-    e.preventDefault();
-    for (let t of Array.from(e.changedTouches)) {
-      const id = t.identifier;
-      const [bx,by] = toBufferCoords(t.clientX, t.clientY);
-      const prevPt = lastTouches.get(id);
-      if (prevPt) {
-        addWaveLine(prevPt, [bx,by], TOUCH_RADIUS);
-      } else {
-        addDropAt(bx,by, TOUCH_RADIUS, DROP_STRENGTH);
-      }
-      lastTouches.set(id, [bx,by]);
-    }
-  }, {passive:false});
-
-  canvas.addEventListener('touchend', (e) => {
-    e.preventDefault();
-    for (let t of Array.from(e.changedTouches)) {
-      lastTouches.delete(t.identifier);
-    }
-  }, {passive:false});
-  canvas.addEventListener('touchcancel', (e)=>{ for (let t of Array.from(e.changedTouches)) lastTouches.delete(t.identifier); }, {passive:false});
-
-  // mouse fallback (for desktop testing)
-  let mouseDown = false, lastMouse = null;
-  canvas.addEventListener('mousedown', (ev) => {
-    ev.preventDefault();
-    mouseDown = true;
-    const [bx,by] = toBufferCoords(ev.clientX, ev.clientY);
-    lastMouse = [bx,by];
-    addDropAt(bx,by, TOUCH_RADIUS, DROP_STRENGTH);
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault(); menuList.classList.remove('open');
+    const [bx, by] = toBufferCoords(e.clientX, e.clientY);
+    if (!pointerOrder.includes(e.pointerId)) pointerOrder.push(e.pointerId);
+    activePointers.set(e.pointerId, [bx, by]);
+    paintObjectAt(bx, by, e.pointerId, [bx, by], [bx, by]);
+    canvas.setPointerCapture(e.pointerId);
   });
-  canvas.addEventListener('mousemove', (ev) => {
-    if (!mouseDown) return;
-    const [bx,by] = toBufferCoords(ev.clientX, ev.clientY);
-    if (lastMouse) addWaveLine(lastMouse, [bx,by], TOUCH_RADIUS);
-    lastMouse = [bx,by];
-  });
-  window.addEventListener('mouseup', ()=>{ mouseDown = false; lastMouse = null; });
 
-  // animation loop
+  canvas.addEventListener('pointermove', (e) => {
+    e.preventDefault(); if (!activePointers.has(e.pointerId)) return;
+    const [bx, by] = toBufferCoords(e.clientX, e.clientY);
+    const lastPos = activePointers.get(e.pointerId);
+    if (lastPos) drawBrushLine(lastPos, [bx, by], e.pointerId);
+    activePointers.set(e.pointerId, [bx, by]);
+  });
+
+  canvas.addEventListener('pointerup', (e) => {
+    e.preventDefault(); activePointers.delete(e.pointerId);
+    pointerOrder = pointerOrder.filter(id => id !== e.pointerId);
+    canvas.releasePointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointercancel', (e) => {
+    activePointers.delete(e.pointerId); pointerOrder = pointerOrder.filter(id => id !== e.pointerId);
+  });
+
   let then = performance.now();
   function loop(now) {
-    // framerate limiting
-    const elapsed = now - then;
-    const minInterval = 1000 / TARGET_FPS;
-    if (elapsed < minInterval) {
-      requestAnimationFrame(loop);
-      return;
-    }
-    then = now;
-
-    // do a few internal substeps if needed (not necessary now)
-    stepWave();
-    renderToImage();
-
     requestAnimationFrame(loop);
+    const elapsed = now - then; const minInterval = 1000 / TARGET_FPS;
+    if (elapsed < minInterval) return;
+    then = now - (elapsed % minInterval);
+    updateOscillators(now); stepWave(); renderToImage();
   }
 
-  // initialize
-  resize();
-
-
-  requestAnimationFrame(loop);
+  resize(); initMenu(); requestAnimationFrame(loop);
 })();
 </script>
 </body>
